@@ -1,0 +1,47 @@
+services:
+  mariadb:
+    build: requirements/mariadb
+    restart: on-failure:6
+    env_file: .env
+    volumes: [ "db_vol:/var/lib/mysql" ]
+    networks: [ dev_net ]
+
+  wordpress:
+    build: requirements/wordpress
+    restart: on-failure:6
+    env_file: .env
+    volumes: [ "wp_vol:/var/www/wordpress" ]
+    networks: [ dev_net ]
+    depends_on: [ mariadb ]
+
+  nginx:
+    build: requirements/nginx
+    restart: on-failure:6
+    env_file: .env
+    ports: [ "443:443" ]
+    volumes: [ "wp_vol:/var/www/wordpress" ]
+    networks: [ dev_net ]
+    depends_on:
+      - wordpress
+      - mariadb
+      - portainer
+
+  portainer:
+    build: requirements/portainer
+    restart: on-failure
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /home/merilhan/data/portainer:/data
+    networks:
+      - dev_net
+
+networks:
+  dev_net:
+
+volumes:
+  db_vol:
+    driver: local
+    driver_opts: { type: none, device: /home/merilhan/data/mariadb, o: bind }
+  wp_vol:
+    driver: local
+    driver_opts: { type: none, device: /home/merilhan/data/wordpress, o: bind }
