@@ -3,6 +3,9 @@ services:
     build: requirements/mariadb
     restart: on-failure:6
     env_file: .env
+    secrets:
+      - db_password
+      - db_root_password
     volumes: [ "db_vol:/var/lib/mysql" ]
     networks: [ dev_net ]
 
@@ -10,28 +13,63 @@ services:
     build: requirements/wordpress
     restart: on-failure:6
     env_file: .env
+    secrets:
+      - db_password
+      - wp_admin_password
+      - wp_user_password
     volumes: [ "wp_vol:/var/www/wordpress" ]
     networks: [ dev_net ]
-    depends_on: [ mariadb ]
+    depends_on: [ mariadb, redis ]
 
   nginx:
     build: requirements/nginx
     restart: on-failure:6
-    env_file: .env
     ports: [ "443:443" ]
     volumes: [ "wp_vol:/var/www/wordpress" ]
     networks: [ dev_net ]
     depends_on:
       - wordpress
-      - mariadb
+      - adminer
       - portainer
+      - static
+
+  ftp:
+    build: requirements/ftp
+    restart: on-failure:6
+    env_file: .env
+    secrets:
+      - ftp_password
+    ports:
+      - "21:21"
+      - "21100-21110:21100-21110"
+    volumes:
+      - wp_vol:/var/www/wordpress
+    networks:
+      - dev_net
+    depends_on: [ wordpress ]
+
+  static:
+    build: requirements/static
+    restart: on-failure:6
+    networks: [ dev_net ]
+
+  redis:
+    build: requirements/redis
+    restart: on-failure:6
+    networks: [ dev_net ]
+
+  adminer:
+    build: requirements/adminer
+    restart: on-failure:6
+    networks: [ dev_net ]
+    depends_on: [ mariadb ]
 
   portainer:
     build: requirements/portainer
-    restart: on-failure
+    restart: on-failure:6
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - /home/merilhan/data/portainer:/data
+      - portainer_vol:/data
     networks:
       - dev_net
 
@@ -45,3 +83,18 @@ volumes:
   wp_vol:
     driver: local
     driver_opts: { type: none, device: /home/merilhan/data/wordpress, o: bind }
+  portainer_vol:
+    driver: local
+    driver_opts: { type: none, device: /home/merilhan/data/portainer, o: bind }
+
+secrets:
+  db_password:
+    file: ../secrets/db_password.txt
+  db_root_password:
+    file: ../secrets/db_root_password.txt
+  wp_admin_password:
+    file: ../secrets/wp_admin_password.txt
+  wp_user_password:
+    file: ../secrets/wp_user_password.txt
+  ftp_password:
+    file: ../secrets/ftp_password.txt
