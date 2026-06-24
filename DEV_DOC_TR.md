@@ -43,8 +43,9 @@
 35. [Veri Depolama](#veri-depolama)
 36. [Projeyi Yönetmek](#projeyi-yönetmek)
 37. [Güvenlik En İyi Pratikleri](#güvenlik-en-i̇yi-pratikleri)
-38. [Sorun Giderme](#sorun-giderme)
-39. [Hızlı Başvuru Kartı](#hızlı-başvuru-kartı)
+38. [OWASP Docker Güvenliği — Ağ Mimarisi](#owasp-docker-güvenliği--ağ-mimarisi)
+39. [Sorun Giderme](#sorun-giderme)
+40. [Hızlı Başvuru Kartı](#hızlı-başvuru-kartı)
 
 ---
 
@@ -792,10 +793,11 @@ WordPress container:
 
 ```bash
 # Hangi container'ların hangi ağda olduğunu gör
-docker network inspect dev_net
+docker network inspect srcs_app
+docker network inspect srcs_data
 
 # Bir container'ın IP'sini gör
-docker inspect --format='{{.NetworkSettings.Networks.srcs_dev_net.IPAddress}}' wordpress
+docker inspect --format='{{.NetworkSettings.Networks.srcs_app.IPAddress}}' wordpress
 
 # Tüm container IP'lerini gör
 docker inspect -f '{{.Name}} - {{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' $(docker ps -q)
@@ -979,7 +981,7 @@ NGINX bir web sunucusu ve ters proxy'dir. Bu projede birkaç şey yapar:
 
 MariaDB ilişkisel bir veritabanıdır — MySQL'in bir fork'u. WordPress tüm içeriği burada saklar: gönderiler, sayfalar, kullanıcılar, ayarlar, her şey.
 
-Sadece Docker iç ağında çalışır. İnternetten doğrudan erişilemez. Sadece WordPress ve Adminer `dev_net` ağı üzerinden bağlanabilir.
+Sadece `data` iç ağında çalışır. İnternetten doğrudan erişilemez, runtime'da internet erişimi de yoktur. Sadece WordPress ve Adminer `data` ağı üzerinden bağlanabilir. NGINX bile MariaDB'ye ulaşamaz.
 
 ### PHP-FPM
 
@@ -1668,7 +1670,7 @@ services:
     volumes:
       - db_vol:/var/lib/mysql     # isimli volume → container yolu
     networks:
-      - dev_net                   # bu iç ağa katıl
+      - data                      # sadece data ağında — NGINX ulaşamaz
 
   wordpress:
     build: requirements/wordpress
@@ -1681,7 +1683,8 @@ services:
     volumes:
       - wp_vol:/var/www/wordpress
     networks:
-      - dev_net
+      - app                       # NGINX buradan erişir
+      - data                      # MariaDB ve Redis'e buradan erişir
     depends_on:                   # wordpress'ten ÖNCE mariadb ve redis başlat
       - mariadb                   # UYARI: sadece "başladı" anlamına gelir, "hazır" değil
       - redis
@@ -1689,23 +1692,22 @@ services:
   nginx:
     build: requirements/nginx
     restart: on-failure:6
-    env_file: .env
     ports:
       - "443:443"                 # HOST:CONTAINER — port 443'ü dışarıya aç
     volumes:
       - wp_vol:/var/www/wordpress # WordPress dosyalarını sunmak için lazım
     networks:
-      - dev_net
+      - public                    # dışarıya açık tek ağ
+      - app                       # uygulama servislerine ulaşmak için
     depends_on:
       - wordpress
-      - mariadb
       - adminer
       - portainer
       - static
 
   ftp:
     build: requirements/ftp
-    restart: on-failure
+    restart: on-failure:6
     env_file: .env
     secrets:
       - ftp_password
@@ -1715,42 +1717,46 @@ services:
     volumes:
       - wp_vol:/var/www/wordpress # FTP WordPress dosyalarına erişim sağlar
     networks:
-      - dev_net
+      - app                       # internet erişimi yok (internal: yes)
     depends_on:
       - wordpress
 
   redis:
     build: requirements/redis
-    restart: on-failure
+    restart: on-failure:6
     networks:
-      - dev_net                   # port expose yok — sadece iç
+      - data                      # port expose yok — sadece data katmanı
 
   adminer:
     build: requirements/adminer
-    restart: on-failure
+    restart: on-failure:6
     networks:
-      - dev_net
+      - app                       # NGINX buradan erişir
+      - data                      # MariaDB'ye buradan erişir
     depends_on:
       - mariadb
 
   portainer:
     build: requirements/portainer
-    restart: on-failure
+    restart: on-failure:6
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock  # portainer'a Docker erişimi verir
-      - /home/merilhan/data/portainer:/data        # portainer verisini buraya kaydeder
+      - portainer_vol:/data                        # portainer verisini buraya kaydeder
     networks:
-      - dev_net
+      - app                       # NGINX buradan erişir
 
   static:
     build: requirements/static
-    restart: on-failure
+    restart: on-failure:6
     networks:
-      - dev_net
+      - app                       # NGINX buradan erişir
 
 networks:
-  dev_net:                        # özel bridge ağı — tüm container'lar buna katılır
-                                  # boş = varsayılanları kullan (bridge sürücüsü, otomatik subnet)
+  public:                         # dışarıya açık — sadece NGINX burada
+  app:
+    internal: yes                 # internet erişimi yok — uygulama katmanı
+  data:
+    internal: yes                 # internet erişimi yok — veritabanı katmanı tamamen izole
 
 volumes:
   db_vol:
@@ -2186,22 +2192,25 @@ stat /var/www/wordpress       # ayrıntılı izinler ve sahiplik
 │    /portainer/→ Portainer (HTTP port 9000)           │
 │    /portfolio/→ Statik site (HTTP port 80)           │
 └──────────────────────────────────────────────────────┘
-    │ (iç ağ: dev_net)
-    ├─────────────────┬──────────────┬──────────────┐
-    ▼                 ▼              ▼              ▼
-┌──────────┐   ┌──────────┐   ┌──────────┐   ┌──────────┐
-│WordPress │   │ Adminer  │   │Portainer │   │  Statik  │
-│PHP-FPM   │   │  :8080   │   │  :9000   │   │ NGINX:80 │
-│  :9000   │   └────┬─────┘   └──────────┘   └──────────┘
+    │ (public ağı → app ağı → data ağı)
+    │
+    │ [public ağı]
+    ├── NGINX (public + app)
+    │
+    │ [app ağı — internal: yes]
+    ├─────────────────┬──────────────┬──────────────┬──────────┐
+    ▼                 ▼              ▼              ▼          ▼
+┌──────────┐   ┌──────────┐   ┌──────────┐   ┌──────────┐ ┌─────┐
+│WordPress │   │ Adminer  │   │Portainer │   │  Statik  │ │ FTP │
+│PHP-FPM   │   │  :8080   │   │  :9000   │   │ NGINX:80 │ │ :21 │
+│  :9000   │   └────┬─────┘   └──────────┘   └──────────┘ └─────┘
 └────┬─────┘        │
-     │              │ port 3306
+     │              │  [data ağı — internal: yes]
      ▼              ▼
 ┌──────────────────────┐
 │       MariaDB        │
 │        :3306         │
 └──────────────────────┘
-     ▲
-     │ port 6379
 ┌──────────┐
 │  Redis   │ ← WordPress nesne önbelleği
 │  :6379   │
@@ -2396,8 +2405,168 @@ mariadb:
 # İYİ — port expose yok, sadece iç ağ
 mariadb:
   networks:
-    - dev_net     # sadece diğer container'lar ulaşabilir
+    - data        # sadece data katmanındaki container'lar ulaşabilir
 ```
+
+---
+
+## OWASP Docker Güvenliği — Ağ Mimarisi
+
+### OWASP Nedir?
+
+OWASP (Open Web Application Security Project), yazılım güvenliği için en iyi pratikleri yayımlayan kar amacı gütmeyen bir kuruluştur. Docker Security Cheat Sheet'i, container'lı uygulamaların saldırı yüzeyini azaltmak için kurallar tanımlar.
+
+### Temel OWASP İlkesi: Ağ Segmentasyonu
+
+OWASP, container'ların güven seviyesine göre farklı ağ katmanlarına ayrılmasını önerir. Birbiriyle iletişim kurması gerekmeyen servisler asla aynı ağda olmamalı.
+
+> *"Ağı segmentlere ayırmak için Docker ağ özelliklerini kullan. Farklı servisler için farklı ağlar oluştur ve container'ları yalnızca ihtiyaç duydukları ağlara ata."*
+
+### Bu Projenin 3 Katmanlı Mimarisi
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    İNTERNET                                  │
+└─────────────────────────┬───────────────────────────────────┘
+                          │ sadece port 443
+┌─────────────────────────▼───────────────────────────────────┐
+│                  public ağı                                  │
+│                                                             │
+│                    [ NGINX ]                                │
+│           (dışarıya açık tek container)                     │
+└──────────────┬──────────────────────────────────────────────┘
+               │ (nginx hem public hem app'te)
+┌──────────────▼──────────────────────────────────────────────┐
+│             app ağı  (internal: yes)                        │
+│                                                             │
+│   [ WordPress ]  [ Adminer ]  [ Portainer ]  [ Static ]    │
+│       [ FTP ]                                               │
+└──────────────┬──────────────────────────────────────────────┘
+               │ (wordpress + adminer hem app hem data'da)
+┌──────────────▼──────────────────────────────────────────────┐
+│             data ağı  (internal: yes)                       │
+│                                                             │
+│              [ MariaDB ]        [ Redis ]                   │
+│      (internet erişimi yok, tamamen izole)                  │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Neden 3 Ağ?
+
+| Ağ | internal | Kimler var | Neden |
+|---|---|---|---|
+| `public` | hayır | nginx | Tek giriş noktası, internete açık |
+| `app` | evet | nginx, wordpress, adminer, portainer, static, ftp | Uygulama katmanı, runtime'da internet gerekmez |
+| `data` | evet | mariadb, redis, wordpress, adminer | Veritabanı katmanı, tamamen izole |
+
+### `internal: yes` Gerçekte Ne Yapar?
+
+```yaml
+networks:
+  data:
+    internal: yes
+```
+
+`internal: yes` olan bir ağın **dış dünyaya yönlendirmesi yoktur**. Bu ağdaki container'lar yalnızca aynı ağdaki diğer container'larla iletişim kurabilir. İnternete veya herhangi bir dış host'a erişemezler.
+
+```bash
+# internal: yes olmadan
+docker exec srcs-mariadb-1 curl https://google.com   # çalışır — güvenlik riski
+
+# internal: yes ile
+docker exec srcs-mariadb-1 curl https://google.com   # başarısız — yol yok
+```
+
+Bu, saldırgan MariaDB container'ının içine girsе bile araç indiremez, veri sızdıramaz veya komuta-kontrol sunucusuna erişemez.
+
+**Önemli:** `internal: yes` host port bağlamalarını (`ports:`) ETKİLEMEZ. NGINX, ağları `internal: yes` olsa bile port 443'ü host'a açabilir. Bu ayar yalnızca internet yönlendirmesini engeller, host-container iletişimini değil.
+
+### Build-Time ve Runtime İnternet Erişimi
+
+OWASP, container'ların runtime'da internete ihtiyaç duymamasını önerir. Dış kaynaklar **build time'da** (Dockerfile'da) çekilmeli, başlangıçta değil.
+
+**Runtime'da `wp core download` ile sorun:**
+
+```sh
+# wp-config.sh — runtime, internal ağda internet yok
+$WP core download   # wordpress.org'a erişmeye çalışır — BAŞARISIZ
+```
+
+WordPress `internal: yes` ağlardaysa bu satır kurulumu başlamadan bitirir.
+
+**OWASP uyumlu çözüm — indirmeyi Dockerfile'a taşı (build time):**
+
+```dockerfile
+# Dockerfile — build time, internet mevcut
+RUN wp core download --path=/var/www/wordpress --allow-root
+```
+
+```sh
+# wp-config.sh — runtime, internet gerekmez
+# wp core download satırı silindi — dosyalar build'den geliyor
+$WP config create ...   # sadece yapılandır, indirme yok
+```
+
+**Neden daha güvenli:**
+
+| | Runtime indirme | Build-time indirme |
+|---|---|---|
+| Runtime'da internet | Gerekli | Gerekmiyor |
+| Tekrarlanabilir build | Hayır (her seferinde farklı WP) | Evet (aynı image = aynı WP) |
+| Saldırı yüzeyi | Container internete çıkabilir | Container tamamen izole |
+| OWASP uyumlu | ❌ | ✅ |
+
+### Saldırı Senaryosu Karşılaştırması
+
+**Tek ağ (eski kurulum):**
+```
+Saldırgan NGINX açığını istismar eder
+    → NGINX container'ında shell alır
+    → NGINX, MariaDB ile aynı dev_net'te
+    → Saldırgan çalıştırır: mysql -h mariadb -u root -p
+    → Direkt veritabanı erişimi — bitti
+```
+
+**3 katmanlı ağ (yeni kurulum):**
+```
+Saldırgan NGINX açığını istismar eder
+    → NGINX container'ında shell alır
+    → NGINX sadece public + app ağlarında
+    → Dener: mysql -h mariadb — ağa erişilemiyor
+    → MariaDB sadece data ağında, NGINX ulaşamaz
+    → Saldırgan app katmanında hapsolur
+```
+
+### Hangi Container Hangisine Erişebilir
+
+| Kaynak → Hedef | MariaDB | Redis | WordPress | NGINX | İnternet |
+|---|---|---|---|---|---|
+| **NGINX** | ❌ | ❌ | ✅ | — | ✅ |
+| **WordPress** | ✅ | ✅ | — | ✅ | ❌ |
+| **Adminer** | ✅ | ❌ | ❌ | ✅ | ❌ |
+| **MariaDB** | — | ❌ | ❌ | ❌ | ❌ |
+| **Redis** | ❌ | — | ❌ | ❌ | ❌ |
+| **Static** | ❌ | ❌ | ❌ | ✅ | ❌ |
+| **Portainer** | ❌ | ❌ | ❌ | ✅ | ❌ |
+| **FTP** | ❌ | ❌ | ✅ (volume) | ✅ | ❌ |
+
+Bu tablo **en az ayrıcalık** ilkesini gösterir — her container yalnızca kesinlikle ihtiyaç duyduğuna erişebilir.
+
+### Bu Projede Uygulanan OWASP Kuralları
+
+| OWASP Kuralı | Nasıl Uygulandı |
+|---|---|
+| Kullanıcı tanımlı ağlar kullan | `public`, `app`, `data` ağları tanımlı |
+| `--link` kullanma | Hiçbir yerde kullanılmıyor |
+| `network: host` kullanma | Hiçbir yerde kullanılmıyor |
+| Güven seviyesine göre segmentlere ayır | 3 katman: public → app → data |
+| `internal` ağlar kullan | `app` ve `data` `internal: yes` |
+| Minimum port açığa çıkarma | Sadece NGINX port 443 dışarıya açık |
+| Şifreleri env variable'da tutma | Tüm şifreler için Docker secrets kullanılıyor |
+| Dockerfile'da şifre yok | Şifreler runtime'da `/run/secrets/` den okunuyor |
+| Root olmayan kullanıcılar | WordPress `www-data`, MariaDB `mysql` olarak çalışıyor |
+| Base image sürümü sabitle | `debian:bookworm` (sabitlenmiş sürüm) |
+| Runtime'da internet erişimi olmasın | WP core build time'da indiriliyor |
 
 ---
 
@@ -2556,7 +2725,8 @@ ls /home/merilhan/data/mariadb/
 
 # ── AĞLAR ────────────────────────────────────────────
 docker network ls
-docker network inspect srcs_dev_net
+docker network inspect srcs_app
+docker network inspect srcs_data
 
 # ── IMAGE'LAR ────────────────────────────────────────
 docker images

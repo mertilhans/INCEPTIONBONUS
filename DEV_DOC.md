@@ -2046,6 +2046,169 @@ mariadb:
 
 ---
 
+## OWASP Docker Security — Network Architecture
+
+### What is OWASP?
+
+OWASP (Open Web Application Security Project) is a non-profit foundation that publishes security best practices for software. Their Docker Security Cheat Sheet defines guidelines to reduce the attack surface of containerized applications.
+
+### Key OWASP Principle: Network Segmentation
+
+OWASP recommends separating containers into network tiers based on trust level. Services that do not need to communicate should never be on the same network.
+
+> *"Use Docker network features to segment the network. Create different networks for different services and assign containers only to the networks they need."*
+
+### This Project's 3-Tier Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    INTERNET                                  │
+└─────────────────────────┬───────────────────────────────────┘
+                          │ port 443 only
+┌─────────────────────────▼───────────────────────────────────┐
+│                  public network                              │
+│                                                             │
+│                    [ NGINX ]                                │
+│              (only container exposed)                       │
+└──────────────┬──────────────────────────────────────────────┘
+               │ (nginx is on both public + app)
+┌──────────────▼──────────────────────────────────────────────┐
+│             app network  (internal: yes)                    │
+│                                                             │
+│   [ WordPress ]  [ Adminer ]  [ Portainer ]  [ Static ]    │
+│       [ FTP ]                                               │
+└──────────────┬──────────────────────────────────────────────┘
+               │ (wordpress + adminer are on both app + data)
+┌──────────────▼──────────────────────────────────────────────┐
+│             data network  (internal: yes)                   │
+│                                                             │
+│              [ MariaDB ]        [ Redis ]                   │
+│         (no internet access, completely isolated)           │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Why 3 Networks?
+
+| Network | internal | Who's on it | Why |
+|---|---|---|---|
+| `public` | no | nginx | Single entry point, exposed to internet |
+| `app` | yes | nginx, wordpress, adminer, portainer, static, ftp | App tier, no internet needed at runtime |
+| `data` | yes | mariadb, redis, wordpress, adminer | Database tier, fully isolated |
+
+### What `internal: yes` Actually Does
+
+```yaml
+networks:
+  data:
+    internal: yes
+```
+
+A network with `internal: yes` has **no routing to the outside world**. Containers on it can only communicate with other containers on the same network. They cannot reach the internet or any external host.
+
+```bash
+# Without internal: yes
+docker exec srcs-mariadb-1 curl https://google.com   # works
+docker exec srcs-mariadb-1 ping 8.8.8.8             # works — security risk
+
+# With internal: yes
+docker exec srcs-mariadb-1 curl https://google.com   # fails — no route
+docker exec srcs-mariadb-1 ping 8.8.8.8             # fails — no route
+```
+
+This means even if an attacker gets inside the MariaDB container, they cannot make outbound connections to download tools, send data, or reach a command-and-control server.
+
+**Important:** `internal: yes` does NOT affect host port bindings (`ports:` in docker-compose). NGINX can still expose port 443 to the host even if its networks had `internal: yes`. The setting only blocks internet routing, not host-to-container communication.
+
+### Attack Scenario Comparison
+
+**Single network (old setup):**
+```
+Attacker exploits NGINX vulnerability
+    → Gets shell in NGINX container
+    → NGINX is on dev_net with MariaDB
+    → Attacker runs: mysql -h mariadb -u root -p
+    → Direct database access — game over
+```
+
+**3-tier network (new setup):**
+```
+Attacker exploits NGINX vulnerability
+    → Gets shell in NGINX container
+    → NGINX is only on public + app networks
+    → Tries: mysql -h mariadb — network unreachable
+    → MariaDB is on data network only, NGINX cannot reach it
+    → Attacker is contained in app tier
+```
+
+### OWASP Rules Applied in This Project
+
+| OWASP Rule | How We Apply It |
+|---|---|
+| Use user-defined networks | `public`, `app`, `data` networks defined |
+| Never use `--link` | Not used anywhere |
+| Never use `network: host` | Not used anywhere |
+| Segment by trust level | 3-tier: public → app → data |
+| Use `internal` networks | `app` and `data` are `internal: yes` |
+| Minimal port exposure | Only NGINX port 443 exposed externally |
+| Secrets not in env vars | Docker secrets used for all passwords |
+| No passwords in Dockerfile | Passwords read at runtime from `/run/secrets/` |
+| Use non-root users | WordPress runs as `www-data`, MariaDB as `mysql` |
+| Specific base image versions | `debian:bookworm` (pinned version) |
+
+### Build-Time vs Runtime Internet Access
+
+OWASP recommends that containers should not need internet access at runtime. Any external resource should be fetched at **build time** (in the Dockerfile), not at startup.
+
+**The problem with `wp core download` at runtime:**
+
+```sh
+# wp-config.sh — runtime, no internet on internal network
+$WP core download   # tries to reach wordpress.org — FAILS
+```
+
+If WordPress is on `internal: yes` networks, this line breaks the entire setup.
+
+**The OWASP-compliant fix — move download to Dockerfile (build time):**
+
+```dockerfile
+# Dockerfile — build time, internet is available
+RUN wp core download --path=/var/www/wordpress --allow-root
+```
+
+```sh
+# wp-config.sh — runtime, no internet needed
+# wp core download is gone — files already exist from build
+$WP config create ...   # just configure, no download
+```
+
+**Why this is more secure:**
+
+| | Runtime download | Build-time download |
+|---|---|---|
+| Internet at runtime | Required | Not needed |
+| Reproducible build | No (latest WP each time) | Yes (same image = same WP) |
+| Attack surface | Container can reach internet | Container fully isolated |
+| OWASP compliant | ❌ | ✅ |
+
+The WordPress container now has zero outbound internet access at runtime. Even if it is compromised, the attacker cannot download tools or exfiltrate data.
+
+### Which Containers Can Reach Which
+
+| From → To | MariaDB | Redis | WordPress | NGINX | Internet |
+|---|---|---|---|---|---|
+| **NGINX** | ❌ | ❌ | ✅ | — | ✅ |
+| **WordPress** | ✅ | ✅ | — | ✅ | ✅ |
+| **Adminer** | ✅ | ❌ | ❌ | ✅ | ❌ |
+| **MariaDB** | — | ❌ | ❌ | ❌ | ❌ |
+| **Redis** | ❌ | — | ❌ | ❌ | ❌ |
+| **Static** | ❌ | ❌ | ❌ | ✅ | ❌ |
+| **Portainer** | ❌ | ❌ | ❌ | ✅ | ❌ |
+| **FTP** | ❌ | ❌ | ✅ (volume) | ✅ | ❌ |
+
+This table shows the principle of **least privilege** — every container can only reach what it absolutely needs.
+
+---
+
 ## Troubleshooting
 
 ### Container Keeps Restarting
