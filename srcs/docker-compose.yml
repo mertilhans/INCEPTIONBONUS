@@ -1,0 +1,127 @@
+services:
+  mariadb:
+    build: requirements/mariadb
+    image: mariadb
+    container_name: mariadb
+    restart: on-failure:6
+    env_file: .env
+    secrets:
+      - db_password
+      - db_root_password
+    volumes: [ "db_vol:/var/lib/mysql" ]
+    networks: [ data ]
+
+  wordpress:
+    build: requirements/wordpress
+    image: wordpress
+    container_name: wordpress
+    restart: on-failure:6
+    env_file: .env
+    secrets:
+      - db_password
+      - wp_admin_password
+      - wp_user_password
+    volumes: [ "wp_vol:/var/www/wordpress" ]
+    networks: [ app, data ]
+    depends_on: [ mariadb, redis ]
+
+  nginx:
+    build: requirements/nginx
+    image: nginx
+    container_name: nginx
+    restart: on-failure:6
+    ports: [ "443:443" ]
+    volumes: [ "wp_vol:/var/www/wordpress" ]
+    networks: [ public, app ]
+    depends_on:
+      - wordpress
+      - adminer
+      - portainer
+      - static
+
+  ftp:
+    build: requirements/ftp
+    image: ftp
+    container_name: ftp
+    restart: on-failure:6
+    env_file: .env
+    secrets:
+      - ftp_password
+    ports:
+      - "21:21"
+      - "21100-21110:21100-21110"
+    volumes:
+      - wp_vol:/var/www/wordpress
+    networks: [ app ]
+    depends_on: [ wordpress ]
+
+  static:
+    build: requirements/static
+    image: static
+    container_name: static
+    restart: on-failure:6
+    networks: [ app ]
+
+  redis:
+    build: requirements/redis
+    image: redis
+    container_name: redis
+    restart: on-failure:6
+    networks: [ data ]
+
+  adminer:
+    build: requirements/adminer
+    image: adminer
+    container_name: adminer
+    restart: on-failure:6
+    networks: [ app, data ]
+    depends_on: [ mariadb ]
+
+  portainer:
+    build: requirements/portainer
+    image: portainer
+    container_name: portainer
+    restart: on-failure:6
+    secrets:
+      - portainer_password
+    command: ["--host=unix:///var/run/docker.sock", "--base-url=/portainer", "--admin-password-file=/run/secrets/portainer_password"]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - portainer_vol:/data
+    networks: [ app ]
+
+networks:
+  public:
+  app:
+    internal: true
+  data:
+    internal: true
+
+volumes:
+  db_vol:
+    name: db_volume
+    driver: local
+    driver_opts: { type: none, device: /home/merilhan/data/mariadb, o: bind }
+  wp_vol:
+    name: wp_volume
+    driver: local
+    driver_opts: { type: none, device: /home/merilhan/data/wordpress, o: bind }
+  portainer_vol:
+    name: portainer_volume
+    driver: local
+    driver_opts: { type: none, device: /home/merilhan/data/portainer, o: bind }
+
+secrets:
+  db_password:
+    file: ../secrets/db_password.txt
+  db_root_password:
+    file: ../secrets/db_root_password.txt
+  wp_admin_password:
+    file: ../secrets/wp_admin_password.txt
+  wp_user_password:
+    file: ../secrets/wp_user_password.txt
+  ftp_password:
+    file: ../secrets/ftp_password.txt
+  portainer_password:
+    file: ../secrets/portainer_password.txt
+
